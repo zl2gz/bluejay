@@ -38,6 +38,7 @@ initialize_timing:
     ; Initialize commutation period to 7.5ms (~1330 erpm)
     mov  Comm_Period4x_L, #00h
     mov  Comm_Period4x_H, #0F0h
+    mov  Comm_Period_Rem, #0            ; Clear the carried averaging remainder
     ret
 
 ;**** **** **** **** **** **** **** **** **** **** **** **** ****
@@ -259,30 +260,74 @@ calc_next_comm_15deg_set_min:
 ;**** **** **** **** **** **** **** **** **** **** **** **** ****
 calc_next_comm_period_fast:
     ; Calculate new commutation time
+    ;
+    ; Comm_Period4x = Comm_Period4x + (4 * Comm_Period - Comm_Period4x) / 16
+    ;
+    ; Rounding the two terms separately (Comm_Period4x / 16 and Comm_Period / 4)
+    ; leaves Comm_Period4x unchanged whenever the two truncated results are
+    ; equal, which holds for every Comm_Period4x in a 16 tick band. Reported
+    ; telemetry is 0.75 * Comm_Period4x, so the band is 12 us of e-period.
+    ; Here the error is formed at full precision and the truncated remainder
+    ; is carried into the next update instead.
+    ;
+    ; The error is biased by 2048 so the intermediate stays positive:
+    ;   biased error = 4 * Comm_Period + remainder + 2048 - Comm_Period4x
+    ; Comm_Period4x is below 512 on this path and Comm_Period below 256, so
+    ; the biased error is between 1536 and 3083 and fits the 12 bit divide.
+    ; The bias is removed after the shift as 2048 / 16 = 128.
+
     mov  Temp3, Comm_Period4x_L         ; Comm_Period4x holds the time of 4 commutations
     mov  Temp4, Comm_Period4x_H
 
-    ; Divide by 16 and store in Temp5
-    Divide_12Bit_By_16 Temp4, Temp3, Temp5
+    ; NOTE: Temp2 is assumed to be zero
+    mov  A, Temp1                       ; Multiply this commutation period by 4
+    add  A, Temp1
+    mov  Temp5, A
+    clr  A
+    rlc  A
+    mov  Temp6, A
+    mov  A, Temp5
+    add  A, Temp5
+    mov  Temp5, A
+    mov  A, Temp6
+    rlc  A
+    mov  Temp6, A                       ; Temp6/5: this commutation period * 4
+
+    mov  A, Temp5                       ; Add the remainder carried from last time
+    add  A, Comm_Period_Rem
+    mov  Temp5, A
+    mov  A, Temp6
+    addc A, #008h                       ; Add the bias of 2048 (bit 11) and the carry
+    mov  Temp6, A
 
     clr  C
-    mov  A, Temp3                       ; Subtract a fraction
-    subb A, Temp5
-    mov  Temp3, A
-    mov  A, Temp4
-    subb A, #0
-    mov  Temp4, A
+    mov  A, Temp5                       ; Subtract Comm_Period4x
+    subb A, Temp3
+    mov  Temp5, A
+    mov  A, Temp6
+    subb A, Temp4
+    mov  Temp6, A                       ; Temp6/5: biased error
 
-    ; NOTE: Temp2 is assumed to be zero (approx. Comm_Period4x_H / 4)
-    mov  A, Temp1                       ; Divide by 4
-    rr   A
-    rr   A
-    anl  A, #03Fh
+    mov  A, Temp5                       ; Keep the truncated remainder for next time
+    anl  A, #00Fh
+    mov  Comm_Period_Rem, A
 
-    add  A, Temp3                       ; Add the divided new time
+    ; Divide by 16 and store in Temp6
+    Divide_12Bit_By_16 Temp6, Temp5, Temp6
+
+    mov  A, Temp3                       ; Add the divided error
+    add  A, Temp6
     mov  Temp3, A
     mov  A, Temp4
     addc A, #0
+    mov  Temp4, A
+
+    clr  C
+    mov  A, Temp3                       ; Remove the bias
+    subb A, #080h
+    mov  Temp3, A
+    mov  A, Temp4
+    subb A, #0
     mov  Temp4, A
 
     mov  Comm_Period4x_L, Temp3         ; Store Comm_Period4x
