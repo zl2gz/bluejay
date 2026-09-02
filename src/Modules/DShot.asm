@@ -240,6 +240,7 @@ dshot_tlm_create_packet:
 
     clr  IE_EA
     mov  A, Comm_Period4x_L             ; Read commutation period
+    mov  Temp6, A                       ; Keep low byte for the 489ns correction
     mov  Tlm_Data_H, Comm_Period4x_H
     setb IE_EA
 
@@ -267,12 +268,27 @@ dshot_tlm_create_packet:
     ;
     ; E-period = Comm_Period3x - 4 * Comm_Period4x_H
 
-    ; NOTE: For better performance assume Comm_Period4x_H < 64
-    ;       (6-bit, above ~5k erpm). At lower speed result will be less precise.
+    ; The correction term is Comm_Period4x / 64. Deriving it from the high byte
+    ; alone makes it a staircase that jumps by 4us every time Comm_Period4x
+    ; crosses a multiple of 256, which REVERSES the reported period as the motor
+    ; accelerates through the boundary: at Comm_Period4x 256 -> 255 the reported
+    ; e-period goes 188 -> 190us while the motor is speeding up. Measured on a
+    ; 12-pole motor at ~53k rpm (317k erpm), confirmed against blade-pass
+    ; acoustics, thrust and electrical power.
+    ;
+    ; Including the low byte's top two bits makes the term step by 1us instead
+    ; of 4us and removes the reversal. Same domain assumption as before
+    ; (Comm_Period4x_H < 64), and Temp5 still cannot exceed 8 bits.
     mov  A, Tlm_Data_H                  ; Comm_Period4x_H
     rl   A                              ; Multiply by 4
     rl   A
     anl  A, #0FCh
+    mov  Temp5, A
+    mov  A, Temp6                       ; Comm_Period4x_L
+    rl   A                              ; Top two bits -> bits 1:0
+    rl   A
+    anl  A, #003h
+    add  A, Temp5
     mov  Temp5, A
 
     clr  C
