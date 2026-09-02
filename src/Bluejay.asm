@@ -233,6 +233,7 @@ Prev_Prev_Comm_L: DS 1                  ; Pre-previous commutation Timer2 timest
 Prev_Prev_Comm_H: DS 1                  ; Pre-previous commutation Timer2 timestamp (hi byte)
 Comm_Period4x_L: DS 1                   ; Timer2 ticks between the last 4 commutations (lo byte)
 Comm_Period4x_H: DS 1                   ; Timer2 ticks between the last 4 commutations (hi byte)
+Comm_Period_Rem: DS 1                   ; Truncated remainder of the Comm_Period4x average (0-15, high rpm only)
 Comparator_Read_Cnt: DS 1               ; Number of comparator reads done
 Wt_Adv_Start_L: DS 1                    ; Timer3 start point for commutation advance timing (lo byte)
 Wt_Adv_Start_H: DS 1                    ; Timer3 start point for commutation advance timing (hi byte)
