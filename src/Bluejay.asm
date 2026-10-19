@@ -204,6 +204,8 @@ Flags3: DS 1                            ; State flags. NOT reset upon motor_star
     Flag_Telemetry_Pending BIT Flags3.0 ; DShot telemetry data packet is ready to be sent
     Flag_Had_Signal BIT Flags3.1        ; Used to detect reset after having had a valid signal
     Flag_User_Reverse_Requested BIT Flags3.2 ; It is set when user request to reverse motors in turtle mode
+    Flag_Pwm_Limited BIT Flags3.3       ; Set by the pwm interrupt when the commanded power was clamped by a limit
+    Flag_Pwm_Limit_Notify BIT Flags3.4  ; Set when power limiting has been detected but still not notified
 
 
 Tlm_Data_L: DS 1                        ; DShot telemetry data (lo byte)
@@ -271,6 +273,7 @@ DShot_GCR_Start_Delay: DS 1
 Ext_Telemetry_L: DS 1                   ; Extended telemetry data to be sent
 Ext_Telemetry_H: DS 1
 Scheduler_Counter: DS 1                 ; Scheduler Heartbeat
+Pwm_Limit_Cnt: DS 1                     ; Number of 16ms periods with power limiting since last debug1 frame (max 60)
 ;**** **** **** **** **** **** **** **** **** **** **** **** ****
 ; Indirect addressing data segments
 ;**** **** **** **** **** **** **** **** **** **** **** **** ****

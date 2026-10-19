@@ -360,6 +360,8 @@ t1_int_zero_rcp_checked_check_limit:
     subb A, Temp2                       ; 8-bit rc pulse
     jnc  t1_int_scale_pwm_resolution
 
+    setb Flag_Pwm_Limited               ; Command is clamped, tell the scheduler
+
 IF PWM_BITS_H == PWM_8_BIT              ; 8-bit pwm
     mov  A, Temp6
     mov  Temp2, A

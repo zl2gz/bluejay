@@ -52,10 +52,9 @@ MASK_REMAINDER_DIV8             EQU ((001h SHL SCHEDULER_COUNTER_DIVIDER_POW2) -
 ; Mask to get the scheduler step
 MASK_STEP                       EQU (007h SHL SCHEDULER_COUNTER_DIVIDER_POW2)
 
-; Scheduler steps for steps 1, 3, 5
+; Scheduler steps for steps 1, 5
 STEP1_STATUS_FRAME              EQU (001h SHL SCHEDULER_COUNTER_DIVIDER_POW2)
-STEP3_DEBUG1_FRAME              EQU (003h SHL SCHEDULER_COUNTER_DIVIDER_POW2)
-STEP5_DEBUG2_FRAME              EQU (005h SHL SCHEDULER_COUNTER_DIVIDER_POW2)
+STEP5_DEBUG1_FRAME              EQU (005h SHL SCHEDULER_COUNTER_DIVIDER_POW2)
 
 ;**** **** **** **** **** **** **** **** **** **** **** **** ****
 ;
@@ -70,13 +69,22 @@ STEP5_DEBUG2_FRAME              EQU (005h SHL SCHEDULER_COUNTER_DIVIDER_POW2)
 ; ReqSch04:       - Update temperature PWM limit on every odd step
 ; ReqSch06:       - Case step 1
 ; ReqSch07:           - [TELEMETRY] Send status frame
-; ReqSch08:       - Case step 3
-; ReqSch09:           - [TELEMETRY] Send debug1 frame
+; ReqSch08:       - Case step 3 and 7
+; ReqSch09:           - [TELEMETRY] Send temperature frame
 ; ReqSch10:       - Case step 5
-; ReqSch11:           - [TELEMETRY] Send debug2 frame
-; ReqSch12:       - Case step 7
-; ReqSch13:           - [TELEMETRY] Send temperature frame
+; ReqSch11:           - [TELEMETRY] Send debug1 frame
 ; ReqSch14:       - Start new ADC conversion after every odd step
+; ReqSch15:   - Every 16ms step
+; ReqSch16:       - Accumulate power limiting activity reported by the pwm interrupt
+;
+; Extensions to the extended telemetry spec (Bluejay specific):
+; - Status frame bit 4: output power was limited since the previous status frame
+; - Debug1 frame (every 1024ms), packed so that a receiver can validate it:
+;     bit 7     pwm limit below 255 (thermal protection, or startup limiter before motor start)
+;     bits 6-5  pwm frequency code (0: 24, 1: 48, 2: 96 kHz), 3 is never sent
+;     bit 4     even parity bit: the whole byte has an even number of ones
+;     bits 3-0  power limited 16ms periods since previous debug1 frame, in units of 64ms (saturates at 15)
+; - Debug2 frame is not used
 ;
 ;**** **** **** **** **** **** **** **** **** **** **** **** ****
 
@@ -86,6 +94,10 @@ scheduler_run:
     ret
 
 scheduler_check_time:
+    ; Accumulate power limiting reported by the pwm interrupt
+    jbc  Flag_Pwm_Limited, scheduler_pwm_limited
+
+scheduler_check_time_counter:
     ; Increment Scheduler Counter
     inc  Scheduler_Counter
 
@@ -97,6 +109,16 @@ scheduler_check_time:
 
     ; 128ms not fully elapsed so do nothing
     ret
+
+scheduler_pwm_limited:
+    setb Flag_Pwm_Limit_Notify
+    mov  A, Pwm_Limit_Cnt
+    cjne A, #60, scheduler_pwm_limited_inc ; Saturate at 60 (15 units of 64ms)
+    sjmp scheduler_check_time_counter
+
+scheduler_pwm_limited_inc:
+    inc  Pwm_Limit_Cnt
+    sjmp scheduler_check_time_counter
 
 scheduler_start:
     ; Choose between odd or even steps
@@ -202,8 +224,10 @@ scheduler_steps_odd_temp_pwm_limit_inc:
 ; Run speciffic odd scheduler step
 scheduler_steps_odd_choose_step:
     ; Check if extended telemetry is enabled, otherwise skip frame generation
-    jnb  Flag_Ext_Tele, scheduler_steps_odd_restart_ADC
+    jb   Flag_Ext_Tele, scheduler_steps_odd_frame
+    ljmp scheduler_steps_odd_restart_ADC ; Out of short jump range
 
+scheduler_steps_odd_frame:
     ; Get scheduler step
     mov  A, Scheduler_Counter
     anl  A, #MASK_STEP
@@ -212,7 +236,7 @@ scheduler_steps_odd_choose_step:
 ; [TELEMETRY] SEND STATUS FRAME
 ;**** **** **** **** **** **** **** **** **** **** **** **** ****
 scheduler_steps_odd_status_frame:
-    cjne A, #STEP1_STATUS_FRAME, scheduler_steps_odd_debug1_frame
+    cjne A, #STEP1_STATUS_FRAME, scheduler_steps_odd_debug_frame
 
     ; if (Demag_Detected_Metric_Max >= 120)
     ;   stat.demagMetricMax = (Demag_Detected_Metric_Max - 120) / 9
@@ -237,11 +261,14 @@ scheduler_steps_odd_status_frame_max_loaded:
     mov  ACC.6, C
     mov  C, Flag_Stall_Notify
     mov  ACC.5, C
+    mov  C, Flag_Pwm_Limit_Notify
+    mov  ACC.4, C
 
     ; Data loaded clear flags
     clr  Flag_Demag_Notify
     clr  Flag_Desync_Notify
     clr  Flag_Stall_Notify
+    clr  Flag_Pwm_Limit_Notify
 
     ; Load status frame
     mov  Ext_Telemetry_L, A             ; Set telemetry low value to status data
@@ -256,28 +283,33 @@ scheduler_steps_odd_status_frame_max_loaded:
 ;**** **** **** **** **** **** **** **** **** **** **** **** ****
 ; [TELEMETRY] SEND DEBUG1 FRAME
 ;**** **** **** **** **** **** **** **** **** **** **** **** ****
-scheduler_steps_odd_debug1_frame:
-    cjne A, #STEP3_DEBUG1_FRAME, scheduler_steps_odd_debug2_frame
+scheduler_steps_odd_debug_frame:
+    ; Steps 3 and 7 send temperature
+    cjne A, #STEP5_DEBUG1_FRAME, scheduler_steps_odd_temperature_frame
 
-    ; Stub for debug 1
-    mov  Ext_Telemetry_L, #088h         ; Set telemetry low value
+    ; Power limited periods in units of 64ms (count is at most 60) and pwm frequency code
+    mov  A, Pwm_Limit_Cnt
+    rr   A
+    rr   A
+    anl  A, #0Fh
+    orl  A, #(PWM_FREQ SHL 5)
+    mov  B, A
+
+    ; Bit 7: pwm limit active
+    clr  C
+    mov  A, Pwm_Limit
+    subb A, #255                        ; Carry set when pwm limit is below 255
+    mov  A, B
+    mov  ACC.7, C
+
+    ; Bit 4: parity bit, makes the number of ones even (bit 4 is clear here)
+    mov  C, PSW_PARITY
+    mov  ACC.4, C
+    mov  Ext_Telemetry_L, A             ; Set telemetry low value
     mov  Ext_Telemetry_H, #08h          ; Set telemetry high value to debug1 frame ID
 
-    ; Now restart ADC conversion
-    Restart_Adc
-
-    ; Nothing else to do
-    ret
-
-;**** **** **** **** **** **** **** **** **** **** **** **** ****
-; [TELEMETRY] SEND DEBUG2 FRAME
-;**** **** **** **** **** **** **** **** **** **** **** **** ****
-scheduler_steps_odd_debug2_frame:
-    cjne A, #STEP5_DEBUG2_FRAME, scheduler_steps_odd_temperature_frame
-
-    ; Stub for debug 2
-    mov  Ext_Telemetry_L, #0AAh         ; Set telemetry low value
-    mov  Ext_Telemetry_H, #0Ah          ; Set telemetry high value to debug2 frame ID
+    ; Data loaded clear counter
+    mov  Pwm_Limit_Cnt, #0
 
     ; Now restart ADC conversion
     Restart_Adc
@@ -289,8 +321,7 @@ scheduler_steps_odd_debug2_frame:
 ; [TELEMETRY] SEND TEMPERATURE FRAME
 ;**** **** **** **** **** **** **** **** **** **** **** **** ****
 scheduler_steps_odd_temperature_frame:
-    ; If step is not 1, 3 or 5 it has to be 7, so cjmp is not necessary
-    ; cjne A, #STEP7_TEMPERATURE_FRAME, scheduler_steps_odd_restart_ADC
+    ; Steps 3 and 7 send temperature, so cjmp is not necessary
 
 ;**** **** **** **** **** **** **** **** **** **** **** **** ****
 ;
